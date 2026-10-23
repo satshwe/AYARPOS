@@ -1,0 +1,312 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted administrator membership record.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the admin."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin record was created."
+        }
+      },
+      "required": ["uid", "createdAt"]
+    },
+    "UserPublic": {
+      "title": "UserPublic",
+      "description": "Public staff profile without PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner Firebase Auth UID."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Staff display name."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "manager", "cashier"],
+          "maxLength": 20,
+          "description": "Assigned POS role."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp."
+        }
+      },
+      "required": ["uid", "displayName", "role", "createdAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII profile for a user.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner Firebase Auth UID."
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 254,
+          "description": "User email address."
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "User phone number."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp."
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "POS inventory product item.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Creator/Owner UID."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Product name."
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Product category."
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Unit of measurement."
+        },
+        "barcode": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Product barcode."
+        },
+        "price": {
+          "type": "number",
+          "description": "Selling price in MMK."
+        },
+        "cost_price": {
+          "type": "number",
+          "description": "Cost price in MMK."
+        },
+        "stock": {
+          "type": "number",
+          "description": "Current stock quantity."
+        },
+        "low_stock_threshold": {
+          "type": "number",
+          "description": "Minimum stock alert threshold."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": ["ownerId", "name", "category", "unit", "barcode", "price", "cost_price", "stock", "low_stock_threshold", "createdAt", "updatedAt"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "POS sale transaction header.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Cashier/Owner UID."
+        },
+        "slip_number": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Receipt slip number."
+        },
+        "customer_name": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Customer display name."
+        },
+        "total_amount": {
+          "type": "number",
+          "description": "Total amount in MMK."
+        },
+        "discount_amount": {
+          "type": "number",
+          "description": "Discount amount in MMK."
+        },
+        "tax_amount": {
+          "type": "number",
+          "description": "Tax amount in MMK."
+        },
+        "payment_method": {
+          "type": "string",
+          "enum": ["cash", "kpay", "wave", "aya", "credit", "bank"],
+          "maxLength": 20,
+          "description": "Payment method."
+        },
+        "payment_status": {
+          "type": "string",
+          "enum": ["paid", "credit", "refunded"],
+          "maxLength": 20,
+          "description": "Payment status."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "completed", "cancelled"],
+          "maxLength": 20,
+          "description": "Order lifecycle status."
+        },
+        "branch": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Store branch name."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": ["ownerId", "slip_number", "customer_name", "total_amount", "discount_amount", "tax_amount", "payment_method", "payment_status", "status", "branch", "createdAt", "updatedAt"]
+    },
+    "SaleItem": {
+      "title": "SaleItem",
+      "description": "Individual line item in a sale subcollection.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Creator UID."
+        },
+        "saleId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent sale document ID."
+        },
+        "product_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Product name."
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Quantity sold."
+        },
+        "price": {
+          "type": "number",
+          "description": "Unit selling price."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        }
+      },
+      "required": ["ownerId", "saleId", "product_name", "quantity", "price", "createdAt"]
+    },
+    "StoreSyncSnapshot": {
+      "title": "StoreSyncSnapshot",
+      "description": "Synchronized POS state snapshot for multi-device sync.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Last updater UID."
+        },
+        "storeName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Store display name."
+        },
+        "syncVersion": {
+          "type": "number",
+          "description": "Monotonic sync version counter."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of snapshot."
+        }
+      },
+      "required": ["ownerId", "storeName", "syncVersion", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Trusted administrator lookup collection."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublic" },
+      "description": "Public staff profile documents."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Isolated PII subcollection for staff."
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Store inventory products."
+    },
+    "/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "POS sales transactions."
+    },
+    "/sales/{saleId}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/SaleItem" },
+      "description": "Line items belonging to a sale."
+    },
+    "/store_sync/{snapshotId}": {
+      "schema": { "$ref": "#/entities/StoreSyncSnapshot" },
+      "description": "Multi-device POS store sync metadata."
+    }
+  }
+}

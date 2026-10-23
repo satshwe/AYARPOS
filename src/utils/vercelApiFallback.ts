@@ -6,6 +6,12 @@
  * and serves/persists all POS, Inventory, Dashboard, Auth, and Report data in `localStorage`.
  */
 
+import {
+  syncProductToFirestore,
+  deleteProductFromFirestore,
+  syncSaleToFirestore
+} from '../firebase';
+
 const DB_STORAGE_KEY = 'A_Yaung_POS_LocalDB_v1';
 
 interface LocalDBSchema {
@@ -152,6 +158,28 @@ function jsonResponse(data: any, status = 200): Response {
   });
 }
 
+export function getLocalProductsForCloudSync(): any[] {
+  const db = loadDB();
+  return db.products || [];
+}
+
+export function applyCloudProductsToLocalDB(cloudProducts: any[]) {
+  if (!Array.isArray(cloudProducts) || cloudProducts.length === 0) return;
+  const db = loadDB();
+  cloudProducts.forEach((cp) => {
+    const idx = db.products.findIndex((p) => Number(p.id) === Number(cp.id));
+    if (idx !== -1) {
+      db.products[idx] = { ...db.products[idx], ...cp };
+    } else {
+      db.products.push(cp);
+    }
+  });
+  saveDB(db);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('pos-cloud-sync'));
+  }
+}
+
 export async function handleLocalApiFallback(urlStr: string, init?: RequestInit): Promise<Response> {
   const url = new URL(urlStr, window.location.origin);
   const path = url.pathname;
@@ -173,16 +201,13 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
     const rawUser = String(body.username || '').trim();
     const rawPass = String(body.password || '').trim();
 
-    // Case-insensitive username lookup
+    if (!rawUser || !rawPass) {
+      return jsonResponse({ error: 'Invalid credentials' }, 401);
+    }
+
+    // Case-insensitive username lookup with exact password verification
     const matchedUser = db.users.find(
-      u =>
-        u.username.toLowerCase() === rawUser.toLowerCase() &&
-        (u.password === rawPass ||
-          // Also allow default role password or common demo passwords on Vercel static deployment
-          rawPass.toLowerCase() === u.username.toLowerCase() ||
-          rawPass === 'admin' ||
-          rawPass === '123456' ||
-          rawPass === 'admin123')
+      u => u.username.toLowerCase() === rawUser.toLowerCase() && u.password === rawPass
     );
 
     if (matchedUser) {
@@ -191,13 +216,6 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
         username: matchedUser.username,
         role: matchedUser.role
       });
-    }
-
-    // If username is admin/manager/cashier/yadanar, allow sign-in smoothly on static demo deployment
-    const lower = rawUser.toLowerCase();
-    if (['admin', 'manager', 'cashier', 'yadanar'].includes(lower) && rawPass.length > 0) {
-      const role = lower === 'manager' ? 'manager' : lower === 'cashier' ? 'cashier' : 'admin';
-      return jsonResponse({ id: 1, username: rawUser, role });
     }
 
     return jsonResponse({ error: 'Invalid credentials' }, 401);
@@ -242,6 +260,7 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
     };
     db.products.push(newProd);
     saveDB(db);
+    syncProductToFirestore(newProd).catch(() => {});
     return jsonResponse(newProd);
   }
 
@@ -260,7 +279,9 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
     const list = Array.isArray(body.products) ? body.products : [];
     list.forEach((item: any) => {
       const nextId = db.products.reduce((max, p) => Math.max(max, p.id || 0), 0) + 1;
-      db.products.push({ ...item, id: item.id || nextId });
+      const created = { ...item, id: item.id || nextId };
+      db.products.push(created);
+      syncProductToFirestore(created).catch(() => {});
     });
     saveDB(db);
     return jsonResponse({ success: true });
@@ -270,7 +291,10 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
     const updates = Array.isArray(body.updates) ? body.updates : [];
     updates.forEach((u: any) => {
       const prod = db.products.find(p => p.id === Number(u.id));
-      if (prod && u.stock != null) prod.stock = Number(u.stock);
+      if (prod && u.stock != null) {
+        prod.stock = Number(u.stock);
+        syncProductToFirestore(prod).catch(() => {});
+      }
     });
     saveDB(db);
     return jsonResponse({ success: true });
@@ -283,6 +307,7 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
     if (prod && body.stock != null) {
       prod.stock = Number(body.stock);
       saveDB(db);
+      syncProductToFirestore(prod).catch(() => {});
     }
     return jsonResponse({ success: true });
   }
@@ -302,6 +327,7 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
         created_at: new Date().toISOString()
       });
       saveDB(db);
+      syncProductToFirestore(prod).catch(() => {});
     }
     return jsonResponse({ success: true });
   }
@@ -320,12 +346,14 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
       if (idx !== -1) {
         db.products[idx] = { ...db.products[idx], ...body, id };
         saveDB(db);
+        syncProductToFirestore(db.products[idx]).catch(() => {});
       }
       return jsonResponse({ success: true });
     }
     if (method === 'DELETE') {
       db.products = db.products.filter(p => p.id !== id);
       saveDB(db);
+      deleteProductFromFirestore(id).catch(() => {});
       return jsonResponse({ success: true });
     }
   }
@@ -372,6 +400,7 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
       });
     }
     saveDB(db);
+    syncSaleToFirestore(newSale, Array.isArray(body.items) ? body.items : []).catch(() => {});
     return jsonResponse({ success: true, saleId: nextId, slipNumber: finalSlip });
   }
 
@@ -794,6 +823,56 @@ export async function handleLocalApiFallback(urlStr: string, init?: RequestInit)
     return jsonResponse([]);
   }
 
+  // 12. Full Database Backup
+  if (path === '/api/database/backup' && method === 'GET') {
+    const sanitizedUsers = (db.users || []).map(({ password, ...rest }) => rest);
+    const transactions = (db.sales || []).map((s: any) => ({
+      ...s,
+      items: (db.sale_items || []).filter((si: any) => si.sale_id === s.id)
+    }));
+
+    return jsonResponse({
+      metadata: {
+        appName: 'A_Yaung POS System',
+        backupVersion: '1.0',
+        exportedAt: new Date().toISOString(),
+        storeName: db.store_profile?.name || 'ရတနာ (မော်လမြိုင်)',
+        currency: db.store_profile?.currency || 'MMK'
+      },
+      summary: {
+        totalProducts: (db.products || []).length,
+        totalStockUnits: (db.products || []).reduce((sum: number, p: any) => sum + (Number(p.stock) || 0), 0),
+        totalTransactions: transactions.length,
+        totalSaleLineItems: (db.sale_items || []).length,
+        totalRevenue: (db.sales || [])
+          .filter((s: any) => s.status === 'completed')
+          .reduce((sum: number, s: any) => sum + (Number(s.total_amount) || 0), 0),
+        totalCustomers: (db.customers || []).length,
+        totalSuppliers: (db.suppliers || []).length,
+        totalPurchaseOrders: (db.purchase_orders || []).length,
+        totalExpenses: (db.expenses || []).length,
+        totalStockAdjustments: (db.stock_adjustments || []).length
+      },
+      data: {
+        store_profile: db.store_profile || null,
+        products: db.products || [],
+        transactions,
+        sales: db.sales || [],
+        sale_items: db.sale_items || [],
+        customers: db.customers || [],
+        customer_payments: db.customer_payments || [],
+        suppliers: db.suppliers || [],
+        purchase_orders: db.purchase_orders || [],
+        purchase_order_items: db.purchase_order_items || [],
+        expenses: db.expenses || [],
+        stock_adjustments: db.stock_adjustments || [],
+        cash_movements: db.cash_movements || [],
+        sale_returns: db.sale_returns || [],
+        users: sanitizedUsers
+      }
+    });
+  }
+
   return jsonResponse({ success: true });
 }
 
@@ -823,8 +902,12 @@ export function createVercelSmartFetch(
       const response = await originalFetch(input, init);
       const contentType = response.headers.get('content-type') || '';
 
-      // If we got a valid JSON response from Express (200 OK), return it directly
+      // If we got a valid JSON response from Express (200 OK), mirror mutations to LocalDB + Firestore and return
       if (response.ok && contentType.includes('application/json')) {
+        const method = (init?.method || 'GET').toUpperCase();
+        if (method !== 'GET') {
+          handleLocalApiFallback(urlStr, init).catch(() => {});
+        }
         return response;
       }
 

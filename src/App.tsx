@@ -28,7 +28,8 @@ import {
   Sun,
   Wifi,
   WifiOff,
-  RefreshCw
+  RefreshCw,
+  Cloud
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import POS from './components/POS';
@@ -47,6 +48,19 @@ import { useStore } from './StoreContext';
 import { useOfflineSync } from './utils/offlineSync';
 import { OfflineSyncModal } from './components/OfflineSyncModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import {
+  auth,
+  onAuthStateChanged,
+  signInWithGoogleCloud,
+  signOutFromGoogleCloud,
+  subscribeToCloudProducts,
+  pushInitialCatalogToFirestore,
+  FirebaseUser
+} from './firebase';
+import {
+  applyCloudProductsToLocalDB,
+  getLocalProductsForCloudSync
+} from './utils/vercelApiFallback';
 
 export default function App() {
   const { lang, setLang } = useStore();
@@ -54,14 +68,11 @@ export default function App() {
   const [user, setUser] = useState<{ id: number; username: string; role: string } | null>(() => {
     try {
       const saved = localStorage.getItem('pos_active_user');
-      if (saved === 'LOGGED_OUT') return null;
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      id: 1,
-      username: 'Yadanar',
-      role: 'admin'
-    };
+      if (saved === 'LOGGED_OUT' || !saved) return null;
+      return JSON.parse(saved);
+    } catch {
+      return null;
+    }
   });
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -71,7 +82,52 @@ export default function App() {
   const [alertCount, setAlertCount] = useState(0);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showGlobalSyncModal, setShowGlobalSyncModal] = useState(false);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [cloudSyncing, setCloudSyncing] = useState(false);
   const { isOnline, pendingCount, isSyncing } = useOfflineSync();
+
+  // Listen to Firebase Auth and attach real-time Firestore listener when authenticated
+  useEffect(() => {
+    let unsubscribeProducts: (() => void) | null = null;
+    const unsubscribeAuth = onAuthStateChanged(auth, (fbUser) => {
+      setFirebaseUser(fbUser);
+      if (unsubscribeProducts) {
+        unsubscribeProducts();
+        unsubscribeProducts = null;
+      }
+      if (fbUser && fbUser.emailVerified) {
+        unsubscribeProducts = subscribeToCloudProducts(fbUser, (cloudProducts) => {
+          applyCloudProductsToLocalDB(cloudProducts);
+        });
+      }
+    });
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeProducts) unsubscribeProducts();
+    };
+  }, []);
+
+  const handleCloudDbSync = async () => {
+    setCloudSyncing(true);
+    try {
+      let currentFbUser = firebaseUser;
+      if (!currentFbUser) {
+        currentFbUser = await signInWithGoogleCloud();
+        setFirebaseUser(currentFbUser);
+      }
+      if (currentFbUser && currentFbUser.emailVerified) {
+        const res = await window.fetch('/api/products');
+        const prods = res.ok ? await res.json() : getLocalProductsForCloudSync();
+        if (Array.isArray(prods) && prods.length > 0) {
+          await pushInitialCatalogToFirestore(prods);
+        }
+      }
+    } catch (err) {
+      console.warn('Cloud DB sync error:', err);
+    } finally {
+      setCloudSyncing(false);
+    }
+  };
 
   // Fetch alert count for the top notification bell
   useEffect(() => {
@@ -101,6 +157,7 @@ export default function App() {
     try {
       localStorage.setItem('pos_active_user', 'LOGGED_OUT');
     } catch {}
+    signOutFromGoogleCloud().catch(() => {});
     setUser(null);
     setActiveTab('dashboard');
   };
@@ -397,6 +454,31 @@ export default function App() {
                   {pendingCount}
                 </span>
               )}
+            </button>
+
+            {/* Firebase Cloud DB Sync Button */}
+            <button
+              onClick={handleCloudDbSync}
+              disabled={cloudSyncing}
+              title={
+                firebaseUser
+                  ? `Firebase Cloud DB Connected (${firebaseUser.email}) — Click to sync catalog`
+                  : 'Connect Google Account to enable Firebase Cloud DB real-time sync'
+              }
+              className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-all ${
+                firebaseUser
+                  ? 'bg-blue-50 hover:bg-blue-100 border-blue-200 text-blue-700'
+                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
+              }`}
+            >
+              <Cloud className={`w-3.5 h-3.5 ${cloudSyncing ? 'animate-bounce text-blue-600' : firebaseUser ? 'text-blue-600' : 'text-slate-500'}`} />
+              <span className="hidden lg:inline">
+                {cloudSyncing
+                  ? (isMyanmar ? 'ချိတ်ဆက်နေသည်...' : 'Syncing...')
+                  : firebaseUser
+                    ? (isMyanmar ? 'Cloud DB ချိတ်ပြီး' : 'Cloud DB Active')
+                    : (isMyanmar ? 'Cloud DB ချိတ်ရန်' : 'Connect Cloud DB')}
+              </span>
             </button>
 
             <PWAInstallButton compact />

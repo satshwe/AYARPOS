@@ -122,6 +122,17 @@ export default function Dashboard({ onNavigateTab }: DashboardProps) {
   const [customersList, setCustomersList] = useState<Customer[]>([]);
   const [suppliersList, setSuppliersList] = useState<Supplier[]>([]);
 
+  // Dedicated Low Stock Alert Notification Area states
+  const [lowStockFilter, setLowStockFilter] = useState<'all' | 'out' | 'critical' | 'warning'>('all');
+  const [lowStockCategory, setLowStockCategory] = useState<string>('all');
+  const [lowStockSearch, setLowStockSearch] = useState<string>('');
+  const [dismissedLowStockIds, setDismissedLowStockIds] = useState<number[]>([]);
+  const [quickRestockProductId, setQuickRestockProductId] = useState<number | null>(null);
+  const [quickRestockQty, setQuickRestockQty] = useState<string>('20');
+  const [restockingId, setRestockingId] = useState<number | null>(null);
+  const [lowStockRefreshing, setLowStockRefreshing] = useState<boolean>(false);
+  const [showAllLowStock, setShowAllLowStock] = useState<boolean>(false);
+
   // Load data
   const fetchDashboardData = async () => {
     try {
@@ -130,9 +141,10 @@ export default function Dashboard({ onNavigateTab }: DashboardProps) {
       if (endDate) queryParams.append('endDate', endDate);
       if (branch) queryParams.append('branch', branch);
 
-      const [resOverview, resStats] = await Promise.all([
+      const [resOverview, resStats, resProducts] = await Promise.all([
         window.fetch(`/api/dashboard/overview?${queryParams.toString()}`),
-        window.fetch('/api/dashboard/stats')
+        window.fetch('/api/dashboard/stats'),
+        window.fetch('/api/products')
       ]);
 
       if (resOverview.ok) {
@@ -143,11 +155,53 @@ export default function Dashboard({ onNavigateTab }: DashboardProps) {
         const data = await resStats.json();
         setStats(data);
       }
+      if (resProducts.ok) {
+        const prods = await resProducts.json();
+        if (Array.isArray(prods)) {
+          setProductsList(prods);
+        }
+      }
       await fetchTransactionsRevenue();
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Refresh low stock items specifically
+  const handleRefreshLowStockAlerts = async () => {
+    setLowStockRefreshing(true);
+    try {
+      await fetchDashboardData();
+      await fetchRecentActivities(true);
+    } finally {
+      setLowStockRefreshing(false);
+    }
+  };
+
+  // Quick Restock directly from the Low Stock Alert Notification Card
+  const handleQuickRestock = async (product: Product, addQty: number) => {
+    if (!addQty || addQty <= 0) return;
+    setRestockingId(product.id);
+    try {
+      const res = await window.fetch(`/api/products/${product.id}/adjust-stock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          quantity_change: addQty,
+          reason: `Dashboard Low Stock Alert မှ အမြန်ဖြည့်တင်းခြင်း (+${addQty} ${product.unit || 'pc'})`
+        })
+      });
+      if (res.ok) {
+        setQuickRestockProductId(null);
+        await fetchDashboardData();
+        await fetchRecentActivities(true);
+      }
+    } catch (err) {
+      console.error('Quick restock failed:', err);
+    } finally {
+      setRestockingId(null);
     }
   };
 
@@ -242,6 +296,15 @@ export default function Dashboard({ onNavigateTab }: DashboardProps) {
     }, 8000);
     return () => clearInterval(interval);
   }, [activityFilter, isAutoPolling]);
+
+  // Listen to real-time Firestore Cloud DB product updates
+  useEffect(() => {
+    const onCloudSync = () => {
+      fetchDashboardData();
+    };
+    window.addEventListener('pos-cloud-sync', onCloudSync);
+    return () => window.removeEventListener('pos-cloud-sync', onCloudSync);
+  }, [startDate, endDate, branch]);
 
   // Relative time helper
   const formatRelativeTime = (isoString: string) => {
@@ -860,6 +923,501 @@ export default function Dashboard({ onNavigateTab }: DashboardProps) {
 
         </div>
       </div>
+
+      {/* 4B. Dedicated Low-Stock Alert Notification Area (စတော့လက်ကျန်နည်းနေသော ပစ္စည်းများ သတိပေးချက်စင်တာ) */}
+      {(() => {
+        // Combine productsList and overview.lowStockProducts to ensure live, accurate low-stock items
+        const sourceProducts = productsList.length > 0 ? productsList : (overview.lowStockProducts || []);
+        const allLowStockItems = sourceProducts
+          .filter(p => p.stock <= (p.low_stock_threshold ?? 10))
+          .sort((a, b) => {
+            if (a.stock === 0 && b.stock !== 0) return -1;
+            if (b.stock === 0 && a.stock !== 0) return 1;
+            const ratioA = a.stock / Math.max(1, a.low_stock_threshold ?? 10);
+            const ratioB = b.stock / Math.max(1, b.low_stock_threshold ?? 10);
+            return ratioA - ratioB;
+          });
+
+        const activeLowStockItems = allLowStockItems.filter(p => !dismissedLowStockIds.includes(p.id));
+        const outOfStockCount = activeLowStockItems.filter(p => p.stock === 0).length;
+        const criticalLowCount = activeLowStockItems.filter(p => {
+          const threshold = p.low_stock_threshold ?? 10;
+          return p.stock > 0 && p.stock <= Math.ceil(threshold * 0.4);
+        }).length;
+        const warningLowCount = activeLowStockItems.filter(p => {
+          const threshold = p.low_stock_threshold ?? 10;
+          return p.stock > Math.ceil(threshold * 0.4) && p.stock <= threshold;
+        }).length;
+
+        const categories = Array.from(
+          new Set(allLowStockItems.map(p => p.category).filter(Boolean))
+        ) as string[];
+
+        const filteredLowStock = activeLowStockItems.filter(p => {
+          const threshold = p.low_stock_threshold ?? 10;
+          if (lowStockFilter === 'out' && p.stock !== 0) return false;
+          if (lowStockFilter === 'critical' && !(p.stock > 0 && p.stock <= Math.ceil(threshold * 0.4))) return false;
+          if (lowStockFilter === 'warning' && !(p.stock > Math.ceil(threshold * 0.4) && p.stock <= threshold)) return false;
+          if (lowStockCategory !== 'all' && p.category !== lowStockCategory) return false;
+          if (lowStockSearch.trim()) {
+            const q = lowStockSearch.toLowerCase();
+            const matchName = p.name?.toLowerCase().includes(q);
+            const matchCat = p.category?.toLowerCase().includes(q);
+            const matchBarcode = p.barcode?.toLowerCase().includes(q);
+            if (!matchName && !matchCat && !matchBarcode) return false;
+          }
+          return true;
+        });
+
+        const displayedItems = showAllLowStock ? filteredLowStock : filteredLowStock.slice(0, 6);
+
+        return (
+          <div className="bg-white rounded-2xl border border-amber-200/90 shadow-sm overflow-hidden">
+            {/* Top Banner Header */}
+            <div className="p-5 md:p-6 bg-gradient-to-r from-amber-50/90 via-orange-50/50 to-rose-50/60 border-b border-amber-200/70 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="flex items-start gap-3.5">
+                <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 shadow-sm ${
+                  outOfStockCount > 0 || criticalLowCount > 0
+                    ? 'bg-rose-600 text-white'
+                    : activeLowStockItems.length > 0
+                      ? 'bg-amber-500 text-white'
+                      : 'bg-emerald-500 text-white'
+                }`}>
+                  {activeLowStockItems.length > 0 ? (
+                    <AlertTriangle className="w-5 h-5" />
+                  ) : (
+                    <CheckCircle2 className="w-5 h-5" />
+                  )}
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-base md:text-lg font-extrabold text-slate-900 tracking-tight">
+                      {lang === 'my'
+                        ? 'စတော့လက်ကျန်နည်းနေသော ပစ္စည်းများ သတိပေးချက် (Low Stock Inventory Alerts)'
+                        : 'Low Stock Inventory Alert Notifications'}
+                    </h2>
+                    <span className={`text-xs font-extrabold px-2.5 py-0.5 rounded-md border ${
+                      activeLowStockItems.length > 0
+                        ? 'bg-amber-100 text-amber-800 border-amber-300'
+                        : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                    }`}>
+                      {activeLowStockItems.length} {lang === 'my' ? 'မျိုး' : 'Items'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-1">
+                    {lang === 'my'
+                      ? 'သတ်မှတ်ထားသော အနည်းဆုံးလက်ကျန် (Threshold) အောက် ရောက်ရှိနေသည့် ကုန်ပစ္စည်းများကို တိုက်ရိုက်စစ်ဆေးပြီး အမြန်ဖြည့်တင်းနိုင်ပါသည်'
+                      : 'Items currently at or below their minimum stock threshold — restock or create a purchase order directly'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Right Header Summary & Action Buttons */}
+              <div className="flex flex-wrap items-center gap-2">
+                {dismissedLowStockIds.length > 0 && (
+                  <button
+                    onClick={() => setDismissedLowStockIds([])}
+                    className="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 text-xs font-semibold transition-colors"
+                  >
+                    {lang === 'my'
+                      ? `ဖျောက်ထားသော (${dismissedLowStockIds.length}) မျိုး ပြန်ပြရန်`
+                      : `Restore Dismissed (${dismissedLowStockIds.length})`}
+                  </button>
+                )}
+
+                <button
+                  onClick={handleRefreshLowStockAlerts}
+                  disabled={lowStockRefreshing}
+                  className="px-3.5 py-1.5 rounded-xl bg-white hover:bg-amber-50 text-amber-800 border border-amber-200 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${lowStockRefreshing ? 'animate-spin' : ''}`} />
+                  <span>{lang === 'my' ? 'စတော့ ပြန်စစ်ရန်' : 'Sync Stock'}</span>
+                </button>
+
+                {onNavigateTab && (
+                  <button
+                    onClick={() => onNavigateTab('inventory')}
+                    className="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs"
+                  >
+                    <Boxes className="w-3.5 h-3.5" />
+                    <span>{lang === 'my' ? 'စတော့စာရင်းသို့ သွားရန်' : 'Open Inventory'}</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Filter & Search Bar */}
+            <div className="px-5 py-3.5 bg-slate-50/70 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              {/* Severity Filter Tabs */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  onClick={() => setLowStockFilter('all')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    lowStockFilter === 'all'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-white text-slate-600 border border-slate-200/80 hover:bg-slate-100'
+                  }`}
+                >
+                  <span>{lang === 'my' ? 'အားလုံး' : 'All Low Stock'}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[10px] ${
+                    lowStockFilter === 'all' ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-700'
+                  }`}>
+                    {activeLowStockItems.length}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setLowStockFilter('out')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    lowStockFilter === 'out'
+                      ? 'bg-rose-600 text-white shadow-xs'
+                      : 'bg-white text-rose-700 border border-rose-200 hover:bg-rose-50'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-current"></span>
+                  <span>{lang === 'my' ? 'ပစ္စည်းပြတ်လပ် (0)' : 'Out of Stock'}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[10px] ${
+                    lowStockFilter === 'out' ? 'bg-rose-800 text-white' : 'bg-rose-100 text-rose-800'
+                  }`}>
+                    {outOfStockCount}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setLowStockFilter('critical')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    lowStockFilter === 'critical'
+                      ? 'bg-orange-600 text-white shadow-xs'
+                      : 'bg-white text-orange-700 border border-orange-200 hover:bg-orange-50'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-current"></span>
+                  <span>{lang === 'my' ? 'အရေးပေါ်ဖြည့်ရန်' : 'Critical Low'}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[10px] ${
+                    lowStockFilter === 'critical' ? 'bg-orange-800 text-white' : 'bg-orange-100 text-orange-800'
+                  }`}>
+                    {criticalLowCount}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setLowStockFilter('warning')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    lowStockFilter === 'warning'
+                      ? 'bg-amber-500 text-white shadow-xs'
+                      : 'bg-white text-amber-700 border border-amber-200 hover:bg-amber-50'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-current"></span>
+                  <span>{lang === 'my' ? 'သတိပေးအဆင့်' : 'Warning'}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[10px] ${
+                    lowStockFilter === 'warning' ? 'bg-amber-700 text-white' : 'bg-amber-100 text-amber-800'
+                  }`}>
+                    {warningLowCount}
+                  </span>
+                </button>
+              </div>
+
+              {/* Category Filter & Search */}
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={lowStockCategory}
+                  onChange={(e) => setLowStockCategory(e.target.value)}
+                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                >
+                  <option value="all">{lang === 'my' ? 'အမျိုးအစား အားလုံး' : 'All Categories'}</option>
+                  {categories.map(cat => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+
+                <div className="relative w-full sm:w-56">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={lowStockSearch}
+                    onChange={(e) => setLowStockSearch(e.target.value)}
+                    placeholder={lang === 'my' ? 'ပစ္စည်းအမည်၊ Barcode ရှာရန်...' : 'Search low-stock item...'}
+                    className="w-full pl-8 pr-7 py-1.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                  />
+                  {lowStockSearch && (
+                    <button
+                      onClick={() => setLowStockSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Notification Cards Grid / List */}
+            <div className="p-5 md:p-6">
+              {filteredLowStock.length === 0 ? (
+                <div className="py-10 text-center bg-slate-50/60 rounded-2xl border border-dashed border-slate-200">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-3">
+                    <CheckCircle2 className="w-6 h-6" />
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-800">
+                    {activeLowStockItems.length === 0
+                      ? (lang === 'my' ? 'စတော့နည်းနေသော ကုန်ပစ္စည်း မရှိပါ' : 'All inventory items are well stocked!')
+                      : (lang === 'my' ? 'ရွေးချယ်ထားသော စစ်ထုတ်မှုနှင့် ကိုက်ညီသည့် ပစ္စည်းမရှိပါ' : 'No low-stock items match your filter')}
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {activeLowStockItems.length === 0
+                      ? (lang === 'my' ? 'ကုန်ပစ္စည်းအားလုံးသည် သတ်မှတ်ထားသော အနည်းဆုံးလက်ကျန်အထက်တွင် ရှိနေပါသည်' : 'Every product is above its minimum stock threshold.')
+                      : (lang === 'my' ? 'အခြား အမျိုးအစား သို့မဟုတ် အဆင့်ကို ရွေးချယ်ကြည့်ရှုပါ' : 'Try clearing the search query or selecting All Low Stock.')}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {displayedItems.map((item) => {
+                    const threshold = item.low_stock_threshold ?? 10;
+                    const isOut = item.stock === 0;
+                    const isCritical = item.stock > 0 && item.stock <= Math.ceil(threshold * 0.4);
+                    const stockPercent = Math.min(100, Math.max(0, Math.round((item.stock / Math.max(1, threshold)) * 100)));
+                    const shortageQty = Math.max(1, threshold - item.stock);
+                    const recommendedOrderQty = Math.max(20, threshold * 2 - item.stock);
+                    const isQuickRestockOpen = quickRestockProductId === item.id;
+
+                    return (
+                      <div
+                        key={item.id}
+                        className={`rounded-2xl border p-4 transition-all relative flex flex-col justify-between gap-3 ${
+                          isOut
+                            ? 'bg-rose-50/40 border-rose-200/90 hover:border-rose-300'
+                            : isCritical
+                              ? 'bg-orange-50/40 border-orange-200/90 hover:border-orange-300'
+                              : 'bg-amber-50/30 border-amber-200/80 hover:border-amber-300'
+                        }`}
+                      >
+                        {/* Top row: Item Title, Category, Urgency Badge & Dismiss */}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md border ${
+                                isOut
+                                  ? 'bg-rose-600 text-white border-rose-600'
+                                  : isCritical
+                                    ? 'bg-orange-500 text-white border-orange-500'
+                                    : 'bg-amber-100 text-amber-800 border-amber-300'
+                              }`}>
+                                {isOut
+                                  ? (lang === 'my' ? 'ပစ္စည်းပြတ်လပ် (Out of Stock)' : 'Out of Stock')
+                                  : isCritical
+                                    ? (lang === 'my' ? 'အရေးပေါ်ဖြည့်ရန် (Critical)' : 'Critical Low')
+                                    : (lang === 'my' ? 'လက်ကျန်နည်း (Low Stock)' : 'Low Stock')}
+                              </span>
+
+                              {item.category && (
+                                <span className="text-[11px] font-semibold text-slate-600 bg-white px-2 py-0.5 rounded-md border border-slate-200/80">
+                                  {item.category}
+                                </span>
+                              )}
+
+                              {item.barcode && (
+                                <span className="text-[10px] font-mono text-slate-400">
+                                  #{item.barcode}
+                                </span>
+                              )}
+                            </div>
+
+                            <h3 className="text-sm md:text-base font-extrabold text-slate-900 mt-1.5 truncate">
+                              {item.name}
+                            </h3>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              {lang === 'my' ? 'ရောင်းဈေး:' : 'Price:'}{' '}
+                              <span className="font-bold text-slate-700">{formatCurrency(item.price)}</span>
+                              {item.cost_price ? (
+                                <span className="ml-2 text-slate-400">
+                                  • {lang === 'my' ? 'ဝယ်ရင်းဈေး:' : 'Cost:'} {formatCurrency(item.cost_price)}
+                                </span>
+                              ) : null}
+                            </p>
+                          </div>
+
+                          {/* Dismiss notification button */}
+                          <button
+                            type="button"
+                            onClick={() => setDismissedLowStockIds(prev => [...prev, item.id])}
+                            title={lang === 'my' ? 'ဤသတိပေးချက်ကို ခေတ္တဖျောက်ထားရန်' : 'Dismiss alert'}
+                            className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-white/80 transition-colors shrink-0"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        {/* Middle row: Stock Progress Bar & Threshold Numbers */}
+                        <div className="bg-white/90 rounded-xl p-3 border border-slate-200/60 space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-semibold text-slate-600">
+                              {lang === 'my' ? 'လက်ရှိ လက်ကျန်ပမာဏ:' : 'Current Stock Level:'}
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className={`text-sm font-black ${
+                                isOut ? 'text-rose-600' : isCritical ? 'text-orange-600' : 'text-amber-700'
+                              }`}>
+                                {item.stock} {item.unit || 'ခု'}
+                              </span>
+                              <span className="text-slate-400">/</span>
+                              <span className="text-xs font-semibold text-slate-500">
+                                {lang === 'my' ? `သတိပေးအမှတ်: ${threshold} ${item.unit || 'ခု'}` : `Min: ${threshold} ${item.unit || 'pc'}`}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Progress bar */}
+                          <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full transition-all duration-300 ${
+                                isOut
+                                  ? 'bg-rose-500'
+                                  : isCritical
+                                    ? 'bg-orange-500'
+                                    : 'bg-amber-500'
+                              }`}
+                              style={{ width: `${ isOut ? 4 : stockPercent }%` }}
+                            />
+                          </div>
+
+                          <div className="flex items-center justify-between text-[11px] text-slate-500">
+                            <span>
+                              {item.stock < threshold
+                                ? (lang === 'my'
+                                    ? `သတ်မှတ်ချက်ပြည့်ရန် ${shortageQty} ${item.unit || 'ခု'} လိုအပ်နေပါသည်`
+                                    : `${shortageQty} ${item.unit || 'pc'} below minimum threshold`)
+                                : (lang === 'my'
+                                    ? 'အနည်းဆုံးသတိပေးအမှတ်သို့ ရောက်ရှိနေပါသည်'
+                                    : 'At minimum stock threshold')}
+                            </span>
+                            <span className="font-bold text-slate-700">
+                              {stockPercent}%
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Bottom row: Quick Restock & Purchase Order Actions */}
+                        {isQuickRestockOpen ? (
+                          <div className="bg-white p-3 rounded-xl border border-indigo-200 flex flex-wrap items-center justify-between gap-2 animate-in fade-in">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-bold text-slate-700">
+                                {lang === 'my' ? 'အမြန်ဖြည့်ရန်:' : 'Add Stock:'}
+                              </span>
+                              {[10, 20, 50].map(presetQty => (
+                                <button
+                                  key={presetQty}
+                                  type="button"
+                                  disabled={restockingId === item.id}
+                                  onClick={() => handleQuickRestock(item, presetQty)}
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold transition-colors disabled:opacity-50"
+                                >
+                                  +{presetQty}
+                                </button>
+                              ))}
+                            </div>
+
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                min="1"
+                                value={quickRestockQty}
+                                onChange={(e) => setQuickRestockQty(e.target.value)}
+                                className="w-16 px-2 py-1 border border-slate-300 rounded-lg text-xs font-bold text-center"
+                              />
+                              <button
+                                type="button"
+                                disabled={restockingId === item.id}
+                                onClick={() => handleQuickRestock(item, Number(quickRestockQty))}
+                                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg shadow-2xs disabled:opacity-50"
+                              >
+                                {restockingId === item.id
+                                  ? '...'
+                                  : (lang === 'my' ? 'ဖြည့်မည်' : 'Save')}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setQuickRestockProductId(null)}
+                                className="p-1 text-slate-400 hover:text-slate-600"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                disabled={restockingId === item.id}
+                                onClick={() => handleQuickRestock(item, 10)}
+                                className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-2xs transition-colors flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>{restockingId === item.id ? '...' : `+10 ${item.unit || ''}`}</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setQuickRestockProductId(item.id);
+                                  setQuickRestockQty(String(recommendedOrderQty));
+                                }}
+                                className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-xs font-semibold transition-colors"
+                              >
+                                {lang === 'my' ? 'စိတ်ကြိုက်ဖြည့်ရန်' : 'Custom Qty'}
+                              </button>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveModal('new_purchase');
+                                setPurchaseForm({
+                                  supplier_id: '',
+                                  product_id: String(item.id),
+                                  quantity: String(recommendedOrderQty),
+                                  cost_price: String(item.cost_price || item.price),
+                                  notes: `Low Stock Restock Order for ${item.name} (Current: ${item.stock} ${item.unit || 'pc'})`
+                                });
+                              }}
+                              className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold shadow-2xs transition-colors flex items-center gap-1.5"
+                            >
+                              <PackagePlus className="w-3.5 h-3.5" />
+                              <span>{lang === 'my' ? 'PO မှာယူရန်' : 'Order PO'}</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Show More / Show Less Toggle if more than 6 low-stock items */}
+              {filteredLowStock.length > 6 && (
+                <div className="mt-4 pt-3 border-t border-slate-100 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllLowStock(!showAllLowStock)}
+                    className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <span>
+                      {showAllLowStock
+                        ? (lang === 'my' ? 'အနည်းငယ်သာ ပြသရန် (Show Less)' : 'Show Less')
+                        : (lang === 'my'
+                            ? `ကျန်ရှိသော ပစ္စည်း (${filteredLowStock.length - 6}) မျိုးအားလုံး ကြည့်ရန်`
+                            : `View All ${filteredLowStock.length} Low Stock Items`)}
+                    </span>
+                    <ChevronDown className={`w-4 h-4 transition-transform ${showAllLowStock ? 'rotate-180' : ''}`} />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 5. Analytics & Charts Section */}
       <div className="space-y-6">

@@ -1757,19 +1757,16 @@ async function startServer() {
     const cleanUser = String(req.body?.username || '').trim();
     const cleanPass = String(req.body?.password || '').trim();
 
+    if (!cleanUser || !cleanPass) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
     const user = db.prepare(
-      "SELECT id, username, role FROM users WHERE LOWER(username) = LOWER(?) AND (password = ? OR LOWER(password) = LOWER(?))"
-    ).get(cleanUser, cleanPass, cleanPass) as any;
+      "SELECT id, username, role FROM users WHERE LOWER(username) = LOWER(?) AND password = ?"
+    ).get(cleanUser, cleanPass) as any;
 
     if (user) {
       return res.json(user);
-    }
-
-    // Fallback for built-in demo accounts if password was typed with different case or common demo password
-    const lowerUser = cleanUser.toLowerCase();
-    if (['admin', 'manager', 'cashier', 'yadanar'].includes(lowerUser) && cleanPass.length > 0) {
-      const role = lowerUser === 'manager' ? 'manager' : lowerUser === 'cashier' ? 'cashier' : 'admin';
-      return res.json({ id: 1, username: cleanUser, role });
     }
 
     res.status(401).json({ error: "Invalid credentials" });
@@ -1808,6 +1805,85 @@ async function startServer() {
       receipt_footer !== undefined ? receipt_footer : null
     );
     res.json({ success: true });
+  });
+
+  // Full Database Backup endpoint (Products, Transactions, Customers, Inventory & Store Data)
+  app.get("/api/database/backup", (req, res) => {
+    try {
+      const storeProfile = db.prepare("SELECT * FROM store_profile WHERE id = 1").get() as any;
+      const products = db.prepare("SELECT * FROM products ORDER BY id ASC").all() as any[];
+      const sales = db.prepare("SELECT * FROM sales ORDER BY id DESC").all() as any[];
+      const saleItems = db.prepare("SELECT * FROM sale_items ORDER BY id ASC").all() as any[];
+      const customers = db.prepare("SELECT * FROM customers ORDER BY id ASC").all() as any[];
+      const customerPayments = db.prepare("SELECT * FROM customer_payments ORDER BY id DESC").all() as any[];
+      const suppliers = db.prepare("SELECT * FROM suppliers ORDER BY id ASC").all() as any[];
+      const purchaseOrders = db.prepare("SELECT * FROM purchase_orders ORDER BY id DESC").all() as any[];
+      const purchaseOrderItems = db.prepare("SELECT * FROM purchase_order_items ORDER BY id ASC").all() as any[];
+      const expenses = db.prepare("SELECT * FROM expenses ORDER BY id DESC").all() as any[];
+      const stockAdjustments = db.prepare("SELECT * FROM stock_adjustments ORDER BY id DESC").all() as any[];
+      const cashMovements = db.prepare("SELECT * FROM cash_movements ORDER BY id DESC").all() as any[];
+      const saleReturns = db.prepare("SELECT * FROM sale_returns ORDER BY id DESC").all() as any[];
+      const users = db.prepare("SELECT id, username, role, created_at FROM users ORDER BY id ASC").all() as any[];
+
+      // Enrich transactions with their line items for convenient single-record inspection
+      const itemsBySaleId = new Map<number, any[]>();
+      for (const item of saleItems) {
+        const list = itemsBySaleId.get(item.sale_id) || [];
+        list.push(item);
+        itemsBySaleId.set(item.sale_id, list);
+      }
+
+      const transactions = sales.map((s) => ({
+        ...s,
+        items: itemsBySaleId.get(s.id) || []
+      }));
+
+      const backupPayload = {
+        metadata: {
+          appName: "A_Yaung POS System",
+          backupVersion: "1.0",
+          exportedAt: new Date().toISOString(),
+          storeName: storeProfile?.name || "ရတနာ (မော်လမြိုင်)",
+          currency: storeProfile?.currency || "MMK"
+        },
+        summary: {
+          totalProducts: products.length,
+          totalStockUnits: products.reduce((sum, p) => sum + (Number(p.stock) || 0), 0),
+          totalTransactions: transactions.length,
+          totalSaleLineItems: saleItems.length,
+          totalRevenue: sales
+            .filter((s) => s.status === "completed")
+            .reduce((sum, s) => sum + (Number(s.total_amount) || 0), 0),
+          totalCustomers: customers.length,
+          totalSuppliers: suppliers.length,
+          totalPurchaseOrders: purchaseOrders.length,
+          totalExpenses: expenses.length,
+          totalStockAdjustments: stockAdjustments.length
+        },
+        data: {
+          store_profile: storeProfile || null,
+          products,
+          transactions,
+          sales,
+          sale_items: saleItems,
+          customers,
+          customer_payments: customerPayments,
+          suppliers,
+          purchase_orders: purchaseOrders,
+          purchase_order_items: purchaseOrderItems,
+          expenses,
+          stock_adjustments: stockAdjustments,
+          cash_movements: cashMovements,
+          sale_returns: saleReturns,
+          users
+        }
+      };
+
+      res.json(backupPayload);
+    } catch (error) {
+      console.error("Database backup failed:", error);
+      res.status(500).json({ error: "Failed to generate database backup" });
+    }
   });
 
   app.post("/api/users", (req, res) => {
