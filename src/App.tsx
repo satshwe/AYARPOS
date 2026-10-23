@@ -51,10 +51,17 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 export default function App() {
   const { lang, setLang } = useStore();
   const [activeTab, setActiveTab] = useState<'dashboard' | 'pos' | 'orders' | 'inventory' | 'reports' | 'customers' | 'cash' | 'users' | 'settings' | 'suppliers' | 'purchases' | 'returns'>('dashboard');
-  const [user, setUser] = useState<{ id: number; username: string; role: string } | null>({
-    id: 1,
-    username: 'Yadanar',
-    role: 'admin'
+  const [user, setUser] = useState<{ id: number; username: string; role: string } | null>(() => {
+    try {
+      const saved = localStorage.getItem('pos_active_user');
+      if (saved === 'LOGGED_OUT') return null;
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {
+      id: 1,
+      username: 'Yadanar',
+      role: 'admin'
+    };
   });
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -79,11 +86,21 @@ export default function App() {
       .catch(() => {});
   }, [activeTab]);
 
+  const handleLogin = (loggedInUser: { id: number; username: string; role: string }) => {
+    try {
+      localStorage.setItem('pos_active_user', JSON.stringify(loggedInUser));
+    } catch {}
+    setUser(loggedInUser);
+  };
+
   if (!user) {
-    return <Login onLogin={setUser} />;
+    return <Login onLogin={handleLogin} />;
   }
 
   const handleLogout = () => {
+    try {
+      localStorage.setItem('pos_active_user', 'LOGGED_OUT');
+    } catch {}
     setUser(null);
     setActiveTab('dashboard');
   };

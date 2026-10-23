@@ -1,3 +1,5 @@
+import { createVercelSmartFetch } from './utils/vercelApiFallback';
+
 /**
  * Safety patch for environments where browser extensions or proxies attempt to
  * overwrite window.fetch (e.g. window.fetch = ...), which fails with:
@@ -7,7 +9,8 @@
   if (typeof window === 'undefined') return;
 
   try {
-    const originalFetch = window.fetch ? window.fetch.bind(window) : undefined;
+    const rawFetch = window.fetch ? window.fetch.bind(window) : undefined;
+    const originalFetch = rawFetch ? createVercelSmartFetch(rawFetch) : undefined;
     let currentFetch = originalFetch;
 
     // Define both getter and setter on window
@@ -54,7 +57,9 @@
           (event.filename.includes('chrome-extension://') ||
             event.filename.includes('moz-extension://'))) ||
         (event.message &&
-          event.message.includes('Cannot set property fetch'))
+          (event.message.includes('Cannot set property fetch') ||
+            event.message.includes('WebSocket closed without opened') ||
+            event.message.includes('failed to connect to websocket')))
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -67,10 +72,14 @@
   window.addEventListener(
     'unhandledrejection',
     (event) => {
+      const msg =
+        event.reason && typeof event.reason.message === 'string'
+          ? event.reason.message
+          : String(event.reason || '');
       if (
-        event.reason &&
-        typeof event.reason.message === 'string' &&
-        event.reason.message.includes('Cannot set property fetch')
+        msg.includes('Cannot set property fetch') ||
+        msg.includes('WebSocket closed without opened') ||
+        msg.includes('failed to connect to websocket')
       ) {
         event.preventDefault();
         event.stopPropagation();

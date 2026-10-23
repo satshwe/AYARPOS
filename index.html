@@ -13,6 +13,92 @@
     <title>A_Yaung POS System</title>
     <script>
       (function() {
+        // Suppress Vite HMR WebSocket errors in environments where HMR WebSocket is disabled
+        window.addEventListener('unhandledrejection', function(event) {
+          var reason = event && event.reason;
+          var msg = typeof reason === 'string' ? reason : (reason && reason.message ? reason.message : '');
+          if (
+            msg.indexOf('WebSocket closed without opened') !== -1 ||
+            msg.indexOf('[vite]') !== -1 ||
+            msg.indexOf('failed to connect to websocket') !== -1
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        }, true);
+
+        window.addEventListener('error', function(event) {
+          var msg = (event && event.message) || '';
+          var filename = (event && event.filename) || '';
+          if (
+            filename.indexOf('chrome-extension://') !== -1 ||
+            filename.indexOf('moz-extension://') !== -1 ||
+            filename.indexOf('@vite/client') !== -1 ||
+            msg.indexOf('Cannot set property fetch') !== -1 ||
+            msg.indexOf('WebSocket closed without opened') !== -1
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+          }
+        }, true);
+
+        // Wrap WebSocket so @vite/client HMR connection attempts do not fail and throw
+        try {
+          var NativeWebSocket = window.WebSocket;
+          if (NativeWebSocket) {
+            var PatchedWebSocket = function(url, protocols) {
+              var isViteHmr =
+                protocols === 'vite-hmr' ||
+                (Array.isArray(protocols) && protocols.indexOf('vite-hmr') !== -1) ||
+                (typeof url === 'string' && url.indexOf('vite-hmr') !== -1);
+
+              if (isViteHmr) {
+                var fakeSocket = {
+                  url: url,
+                  readyState: 1, // OPEN
+                  protocol: 'vite-hmr',
+                  extensions: '',
+                  bufferedAmount: 0,
+                  binaryType: 'blob',
+                  onopen: null,
+                  onerror: null,
+                  onclose: null,
+                  onmessage: null,
+                  addEventListener: function(type, listener) {
+                    if (type === 'open' && typeof listener === 'function') {
+                      setTimeout(function() {
+                        try { listener({ type: 'open', target: fakeSocket }); } catch (e) {}
+                      }, 10);
+                    }
+                  },
+                  removeEventListener: function() {},
+                  dispatchEvent: function() { return true; },
+                  send: function() {},
+                  close: function() { this.readyState = 3; }
+                };
+                setTimeout(function() {
+                  if (typeof fakeSocket.onopen === 'function') {
+                    try { fakeSocket.onopen({ type: 'open', target: fakeSocket }); } catch (e) {}
+                  }
+                }, 10);
+                return fakeSocket;
+              }
+
+              if (protocols !== undefined) {
+                return new NativeWebSocket(url, protocols);
+              }
+              return new NativeWebSocket(url);
+            };
+            PatchedWebSocket.prototype = NativeWebSocket.prototype;
+            PatchedWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+            PatchedWebSocket.OPEN = NativeWebSocket.OPEN;
+            PatchedWebSocket.CLOSING = NativeWebSocket.CLOSING;
+            PatchedWebSocket.CLOSED = NativeWebSocket.CLOSED;
+            window.WebSocket = PatchedWebSocket;
+          }
+        } catch (e) {}
+
         try {
           var realFetch = window.fetch;
           var activeFetch = realFetch;
@@ -34,17 +120,6 @@
             } catch (e) {}
           }
         } catch (e) {}
-
-        window.addEventListener('error', function(event) {
-          if (
-            (event.filename && (event.filename.indexOf('chrome-extension://') !== -1 || event.filename.indexOf('moz-extension://') !== -1)) ||
-            (event.message && event.message.indexOf('Cannot set property fetch') !== -1)
-          ) {
-            event.preventDefault();
-            event.stopPropagation();
-            return true;
-          }
-        }, true);
       })();
     </script>
   </head>
